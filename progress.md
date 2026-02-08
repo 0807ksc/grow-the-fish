@@ -214,3 +214,35 @@ Original prompt: [$develop-web-game](/Users/sungchulkang/.codex/skills/develop-w
   - before: `/tmp/growTheFish-mobile-portrait-before.png`, `/tmp/growTheFish-mobile-landscape-before.png`
   - after: `/tmp/growTheFish-mobile-portrait-after.png`, `/tmp/growTheFish-mobile-landscape-after2.png`
   - 결과: 세로/가로 모두 텍스트 겹침 해소, 버튼 가시성 및 배치 정상화
+
+## Update 13
+- 모바일 컨트롤 재배치/입력 방식 변경
+  - `MOVE`를 오른쪽 아래 원형 조이스틱으로 변경
+  - 액션 버튼을 왼쪽 아래 원형 버튼으로 변경
+    - `B` = Boost
+    - `S` = Suck
+    - `A` = ATK
+  - 깊이 조절(`Q/E`)을 핀치 제스처로 변경
+    - 핀치 인: `Q`
+    - 핀치 아웃: `E`
+  - 조이스틱/버튼 터치 중 핀치 오작동 방지 처리 추가
+  - `render_game_to_text.controls` 설명 갱신
+
+## Validation
+- `node --check game.js`: 통과 (2026-02-08, Update 13)
+- 모바일 스크린샷
+  - 시작 화면: `/tmp/growTheFish-mobile-start-controls.png`
+  - 플레이 화면: `/tmp/growTheFish-mobile-playing-controls.png`
+  - 결과: 요청한 위치/형태(우하단 원형 MOVE, 좌하단 원형 B/S/A) 반영 확인
+
+## Update 14
+- 전투 피드백(물기/공격) 강화
+  - 대미지 숫자 팝업 추가(공격/포식/피격 시)
+  - 히트 이펙트(확산 링) 추가
+  - 강한 물기 처치 시 `CRIT BITE!` 강조 텍스트/효과 추가
+  - 피격 지속 상황에서 팝업 스팸 방지 쿨다운 적용
+
+## Validation
+- `node --check game.js`: 통과 (2026-02-08, Update 14)
+- Playwright 회귀 실행: `/tmp/growTheFish-damagefx-check`
+  - 실행/렌더 정상, 콘솔 크래시 없음

@@ -139,6 +139,9 @@
     suctionTimer: 0,
     killFlash: 0,
     biomeImpactTimer: 300,
+    damagePopups: [],
+    hitEffects: [],
+    playerDamagePopupCooldown: 0,
     ui: {
       speciesButtons: [],
       touchButtons: {},
@@ -148,6 +151,8 @@
       moveY: 0,
       buttons: new Set(),
       usingTouch: TOUCH_CAPABLE,
+      pinchStartDist: 0,
+      pinchDepthDir: 0,
     },
   };
 
@@ -246,6 +251,33 @@
 
   function seabedWorldY() {
     return state.world.h * 0.44;
+  }
+
+  function addDamagePopup(x, y, z, text, color = '#ffeaa7', emphasis = 1) {
+    state.damagePopups.push({
+      x,
+      y,
+      z,
+      vy: -48 * emphasis,
+      life: 0.7 + 0.2 * emphasis,
+      maxLife: 0.7 + 0.2 * emphasis,
+      text,
+      color,
+      emphasis,
+    });
+  }
+
+  function addHitEffect(x, y, z, color = 'rgba(255, 210, 140, 0.65)', power = 1) {
+    state.hitEffects.push({
+      x,
+      y,
+      z,
+      r: 14,
+      vr: 95 + power * 40,
+      life: 0.35 + power * 0.2,
+      maxLife: 0.35 + power * 0.2,
+      color,
+    });
   }
 
   function setPlayerSpecies(index) {
@@ -350,6 +382,9 @@
     state.suctionTimer = 0;
     state.killFlash = 0;
     state.biomeImpactTimer = 300;
+    state.damagePopups = [];
+    state.hitEffects = [];
+    state.playerDamagePopupCooldown = 0;
     for (let i = 0; i < 72; i++) spawnEntity(i < 26);
   }
 
@@ -463,6 +498,11 @@
     };
   }
 
+  function circleHit(sx, sy, c) {
+    if (!c) return false;
+    return Math.hypot(sx - c.cx, sy - c.cy) <= c.r;
+  }
+
   function pressAt(sx, sy) {
     if (state.mode === 'start') {
       const ui = state.ui.touchButtons;
@@ -532,31 +572,55 @@
     state.touch.moveX = 0;
     state.touch.moveY = 0;
     state.touch.buttons.clear();
+    state.touch.pinchDepthDir = 0;
     if (state.mode !== 'playing') return;
 
+    const ui = state.ui.touchButtons;
     let moveCount = 0;
     for (const t of touches) {
       const { sx, sy } = getCanvasPoint(t.clientX, t.clientY);
-      if (sx <= canvas.width * 0.56 && sy >= canvas.height * 0.36) {
-        const nx = clamp((sx / (canvas.width * 0.56)) * 2 - 1, -1, 1);
-        const ny = clamp(((sy - canvas.height * 0.36) / (canvas.height * 0.64)) * 2 - 1, -1, 1);
-        state.touch.moveX += nx;
-        state.touch.moveY += ny;
+      if (ui.joy && circleHit(sx, sy, ui.joy)) {
+        const dx = sx - ui.joy.cx;
+        const dy = sy - ui.joy.cy;
+        const len = Math.hypot(dx, dy) || 1;
+        const scale = Math.min(1, len / ui.joy.r);
+        state.touch.moveX += (dx / len) * scale;
+        state.touch.moveY += (dy / len) * scale;
         moveCount += 1;
         continue;
       }
-      const ui = state.ui.touchButtons;
-      if (ui.attack && sx >= ui.attack.x && sx <= ui.attack.x + ui.attack.w && sy >= ui.attack.y && sy <= ui.attack.y + ui.attack.h) state.touch.buttons.add('k');
-      if (ui.suction && sx >= ui.suction.x && sx <= ui.suction.x + ui.suction.w && sy >= ui.suction.y && sy <= ui.suction.y + ui.suction.h) state.touch.buttons.add('x');
-      if (ui.boost && sx >= ui.boost.x && sx <= ui.boost.x + ui.boost.w && sy >= ui.boost.y && sy <= ui.boost.y + ui.boost.h) state.touch.buttons.add('shift');
-      if (ui.depthUp && sx >= ui.depthUp.x && sx <= ui.depthUp.x + ui.depthUp.w && sy >= ui.depthUp.y && sy <= ui.depthUp.y + ui.depthUp.h) state.touch.buttons.add('q');
-      if (ui.depthDown && sx >= ui.depthDown.x && sx <= ui.depthDown.x + ui.depthDown.w && sy >= ui.depthDown.y && sy <= ui.depthDown.y + ui.depthDown.h) state.touch.buttons.add('e');
+      if (circleHit(sx, sy, ui.attack)) state.touch.buttons.add('k');
+      if (circleHit(sx, sy, ui.suction)) state.touch.buttons.add('x');
+      if (circleHit(sx, sy, ui.boost)) state.touch.buttons.add('shift');
     }
 
     if (moveCount > 0) {
       state.touch.moveX = clamp(state.touch.moveX / moveCount, -1, 1);
       state.touch.moveY = clamp(state.touch.moveY / moveCount, -1, 1);
     }
+
+    if (touches.length >= 2) {
+      const p1 = getCanvasPoint(touches[0].clientX, touches[0].clientY);
+      const p2 = getCanvasPoint(touches[1].clientX, touches[1].clientY);
+      const p1OnControl = circleHit(p1.sx, p1.sy, ui.joy) || circleHit(p1.sx, p1.sy, ui.attack) || circleHit(p1.sx, p1.sy, ui.suction) || circleHit(p1.sx, p1.sy, ui.boost) || (ui.pause && p1.sx >= ui.pause.x && p1.sx <= ui.pause.x + ui.pause.w && p1.sy >= ui.pause.y && p1.sy <= ui.pause.y + ui.pause.h);
+      const p2OnControl = circleHit(p2.sx, p2.sy, ui.joy) || circleHit(p2.sx, p2.sy, ui.attack) || circleHit(p2.sx, p2.sy, ui.suction) || circleHit(p2.sx, p2.sy, ui.boost) || (ui.pause && p2.sx >= ui.pause.x && p2.sx <= ui.pause.x + ui.pause.w && p2.sy >= ui.pause.y && p2.sy <= ui.pause.y + ui.pause.h);
+      if (p1OnControl || p2OnControl) {
+        state.touch.pinchStartDist = 0;
+      } else {
+      const dist = Math.hypot(p1.sx - p2.sx, p1.sy - p2.sy);
+      if (!state.touch.pinchStartDist) state.touch.pinchStartDist = dist;
+      const delta = dist - state.touch.pinchStartDist;
+      if (Math.abs(delta) > 18) {
+        state.touch.pinchDepthDir = delta > 0 ? 1 : -1; // out=e, in=q
+        state.touch.pinchStartDist = dist;
+      }
+      }
+    } else {
+      state.touch.pinchStartDist = 0;
+    }
+
+    if (state.touch.pinchDepthDir > 0) state.touch.buttons.add('e');
+    if (state.touch.pinchDepthDir < 0) state.touch.buttons.add('q');
   }
 
   function handleTouchStart(e) {
@@ -585,6 +649,7 @@
 
   function handleTouchEnd(e) {
     e.preventDefault();
+    if (e.touches.length < 2) state.touch.pinchStartDist = 0;
     updateTouchState(e.touches);
   }
 
@@ -607,12 +672,16 @@
       if (dist < pR * 3.2 && inFront) {
         const damage = state.player.size >= e.size * 0.8 ? 90 : 40;
         e.hp -= damage;
+        addDamagePopup(e.x, e.y, e.z, `-${Math.round(damage)}`, '#ffd5b0', damage >= 90 ? 1.2 : 1);
+        addHitEffect(e.x, e.y, e.z, 'rgba(255, 198, 135, 0.75)', damage >= 90 ? 1.1 : 0.8);
         if (e.hp <= 0) {
           e.deadTimer = 0.45;
           state.score += Math.ceil(e.size * 18);
           state.kills += 1;
           state.player.size = clamp(state.player.size + e.size * 0.02, 1, 4.5);
           state.killFlash = 0.2;
+          addDamagePopup(e.x, e.y, e.z - 0.02, 'CRIT BITE!', '#fff4be', 1.35);
+          addHitEffect(e.x, e.y, e.z, 'rgba(255, 244, 190, 0.85)', 1.4);
           killed += 1;
         }
       }
@@ -730,11 +799,19 @@
       const touch = collisionDist < pR + entityRadius(e) * 0.95;
       if (touch) {
         if (canEat) {
+          addDamagePopup(e.x, e.y, e.z, `-${Math.max(1, Math.round(e.hp))}`, '#bfffe0', 1.15);
+          addHitEffect(e.x, e.y, e.z, 'rgba(156, 255, 215, 0.8)', 1.1);
           e.deadTimer = 0.4;
           state.score += Math.ceil(e.size * 11);
           state.player.size = clamp(state.player.size + e.size * 0.022, 1, 4.5);
         } else {
-          state.player.hp = clamp(state.player.hp - dt * 46 * bm.incomingDamageMul, 0, 100);
+          const playerDamage = dt * 46 * bm.incomingDamageMul;
+          state.player.hp = clamp(state.player.hp - playerDamage, 0, 100);
+          if (state.playerDamagePopupCooldown <= 0) {
+            addDamagePopup(state.player.x, state.player.y - 26, state.player.z, `-${Math.max(1, Math.round(playerDamage))}`, '#ffb8b8', 1);
+            addHitEffect(state.player.x, state.player.y, state.player.z, 'rgba(255, 140, 150, 0.78)', 0.9);
+            state.playerDamagePopupCooldown = 0.18;
+          }
           if (state.player.hp <= 0) {
             state.mode = 'gameover';
           }
@@ -757,6 +834,20 @@
     state.spawnCooldown = 0.22;
   }
 
+  function updateCombatEffects(dt) {
+    state.playerDamagePopupCooldown = Math.max(0, state.playerDamagePopupCooldown - dt);
+    for (const p of state.damagePopups) {
+      p.y += p.vy * dt;
+      p.life -= dt;
+    }
+    for (const e of state.hitEffects) {
+      e.r += e.vr * dt;
+      e.life -= dt;
+    }
+    state.damagePopups = state.damagePopups.filter((p) => p.life > 0);
+    state.hitEffects = state.hitEffects.filter((e) => e.life > 0);
+  }
+
   function updatePlaying(dt) {
     state.time += dt;
     state.biomeImpactTimer = Math.max(0, state.biomeImpactTimer - dt);
@@ -768,6 +859,7 @@
     updatePlayer(dt);
     updateEntities(dt);
     updateSpawning(dt);
+    updateCombatEffects(dt);
 
     if (state.player.size >= 4.0 && state.kills >= 8 && state.mode === 'playing') {
       state.mode = 'win';
@@ -1148,7 +1240,7 @@
     infoY += lineGap;
     ctx.fillText('종/맵 변경: 좌우 버튼 (키보드도 가능)', canvas.width * 0.5, infoY);
     infoY += lineGap;
-    ctx.fillText('모바일: 왼쪽 이동패드 + 오른쪽 액션버튼', canvas.width * 0.5, infoY);
+    ctx.fillText('모바일: 오른쪽 아래 MOVE + 왼쪽 아래 B/S/A + 핀치 Q/E', canvas.width * 0.5, infoY);
     infoY += lineGap;
     ctx.fillText('시작: START 버튼 또는 Enter/Space', canvas.width * 0.5, infoY);
     const infoBottom = infoY;
@@ -1265,50 +1357,87 @@
 
   function drawTouchControls() {
     if (!shouldShowTouchUI() || state.mode !== 'playing') return;
-    const joy = {
-      x: canvas.width * 0.06,
-      y: canvas.height * 0.38,
-      w: canvas.width * 0.48,
-      h: canvas.height * 0.56,
-    };
+    const portrait = canvas.height > canvas.width;
+    const mainR = Math.max(52, Math.min(canvas.width, canvas.height) * (portrait ? 0.12 : 0.10));
+    const btnR = Math.max(30, Math.min(canvas.width, canvas.height) * (portrait ? 0.07 : 0.06));
+    const joy = { cx: canvas.width - mainR - 18, cy: canvas.height - mainR - 18, r: mainR };
+    const baseX = 22 + btnR * 1.15;
+    const baseY = canvas.height - 24 - btnR;
+    const step = btnR * 2.1;
+    const boost = { cx: baseX, cy: baseY - step, r: btnR }; // B: top-left
+    const attack = { cx: baseX + step * 1.1, cy: baseY - step * 0.52, r: btnR }; // A: mid-right
+    const suction = { cx: baseX, cy: baseY, r: btnR }; // S: bottom-left
     const pause = { x: canvas.width * 0.90, y: canvas.height * 0.03, w: canvas.width * 0.07, h: canvas.height * 0.08 };
-    const depthUp = { x: canvas.width * 0.62, y: canvas.height * 0.48, w: canvas.width * 0.12, h: canvas.height * 0.13 };
-    const depthDown = { x: canvas.width * 0.62, y: canvas.height * 0.63, w: canvas.width * 0.12, h: canvas.height * 0.13 };
-    const boost = { x: canvas.width * 0.78, y: canvas.height * 0.33, w: canvas.width * 0.15, h: canvas.height * 0.12 };
-    const suction = { x: canvas.width * 0.78, y: canvas.height * 0.50, w: canvas.width * 0.15, h: canvas.height * 0.12 };
-    const attack = { x: canvas.width * 0.78, y: canvas.height * 0.67, w: canvas.width * 0.15, h: canvas.height * 0.12 };
-    state.ui.touchButtons = { ...state.ui.touchButtons, joy, pause, depthUp, depthDown, boost, suction, attack };
+    state.ui.touchButtons = { ...state.ui.touchButtons, joy, pause, boost, suction, attack };
 
     ctx.save();
-    ctx.fillStyle = 'rgba(10, 25, 35, 0.25)';
-    ctx.fillRect(joy.x, joy.y, joy.w, joy.h);
-    ctx.strokeStyle = 'rgba(150, 220, 245, 0.6)';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(joy.x, joy.y, joy.w, joy.h);
+    ctx.fillStyle = 'rgba(10, 25, 35, 0.36)';
+    ctx.beginPath();
+    ctx.arc(joy.cx, joy.cy, joy.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(150, 220, 245, 0.7)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
     ctx.fillStyle = '#d7f6ff';
-    ctx.font = 'bold 16px Trebuchet MS';
-    ctx.fillText('MOVE', joy.x + 10, joy.y + 22);
+    ctx.font = `bold ${Math.max(12, Math.round(mainR * 0.34))}px Trebuchet MS`;
+    ctx.textAlign = 'center';
+    ctx.fillText('MOVE', joy.cx, joy.cy + 6);
 
-    const buttons = [
-      [pause, 'II'],
-      [depthUp, 'Q'],
-      [depthDown, 'E'],
-      [boost, 'BOOST'],
-      [suction, 'SUCK'],
-      [attack, 'ATK'],
-    ];
-    for (const [b, label] of buttons) {
-      ctx.fillStyle = 'rgba(8, 30, 44, 0.5)';
-      ctx.fillRect(b.x, b.y, b.w, b.h);
-      ctx.strokeStyle = 'rgba(170, 230, 255, 0.75)';
-      ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.font = `bold ${Math.max(11, Math.round(btnR * 0.70))}px Trebuchet MS`;
+    for (const [b, label] of [[boost, 'B'], [suction, 'S'], [attack, 'A']]) {
+      ctx.fillStyle = 'rgba(8, 30, 44, 0.56)';
+      ctx.beginPath();
+      ctx.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(170, 230, 255, 0.78)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
       ctx.fillStyle = '#e4faff';
-      ctx.font = 'bold 16px Trebuchet MS';
-      ctx.textAlign = 'center';
-      ctx.fillText(label, b.x + b.w * 0.5, b.y + b.h * 0.57);
-      ctx.textAlign = 'start';
+      ctx.fillText(label, b.cx, b.cy + 5);
     }
+
+    ctx.fillStyle = 'rgba(8, 30, 44, 0.5)';
+    ctx.fillRect(pause.x, pause.y, pause.w, pause.h);
+    ctx.strokeStyle = 'rgba(170, 230, 255, 0.75)';
+    ctx.strokeRect(pause.x, pause.y, pause.w, pause.h);
+    ctx.fillStyle = '#e4faff';
+    ctx.fillText('II', pause.x + pause.w * 0.5, pause.y + pause.h * 0.62);
+    ctx.font = `${Math.max(11, Math.round(btnR * 0.36))}px Trebuchet MS`;
+    ctx.fillStyle = 'rgba(220,245,255,0.86)';
+    ctx.fillText('Pinch in: Q  Pinch out: E', canvas.width * 0.5, canvas.height - 10);
+    ctx.textAlign = 'start';
     ctx.restore();
+  }
+
+  function drawCombatEffects() {
+    for (const e of state.hitEffects) {
+      const p = project(e.x, e.y, e.z);
+      const alpha = clamp(e.life / e.maxLife, 0, 1);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = e.color;
+      ctx.lineWidth = Math.max(1.5, 3 * p.scale);
+      ctx.beginPath();
+      ctx.arc(p.screenX, p.screenY, e.r * p.scale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const pop of state.damagePopups) {
+      const p = project(pop.x, pop.y, pop.z);
+      const alpha = clamp(pop.life / pop.maxLife, 0, 1);
+      const fontSize = Math.round(clamp(15 * p.scale * pop.emphasis + 12, 13, 28));
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.font = `bold ${fontSize}px Trebuchet MS`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = pop.color;
+      ctx.strokeStyle = 'rgba(8,18,26,0.85)';
+      ctx.lineWidth = 3;
+      ctx.strokeText(pop.text, p.screenX, p.screenY - 6);
+      ctx.fillText(pop.text, p.screenX, p.screenY - 6);
+      ctx.restore();
+    }
+    ctx.textAlign = 'start';
   }
 
   function renderWorld() {
@@ -1342,6 +1471,7 @@
       }
     }
 
+    drawCombatEffects();
     drawHUD();
     drawGuides();
     drawTouchControls();
@@ -1423,7 +1553,7 @@
       })),
       entityCount: state.entities.length,
       objective: 'grow, hunt, and survive across river/wetland/reef/ocean/arctic biomes',
-      controls: 'species:1/2/3/[ ], map:,./n/m/4/5, start:enter/space/touch, move:wasd/arrows/touch-pad, depth:q/e/touch, kill:k/touch, suction:x/touch, boost:shift/touch, pause:p/touch, restart:r/touch, fullscreen:f',
+      controls: 'species:1/2/3/[ ], map:,./n/m/4/5, start:enter/space/touch, move:wasd/arrows/right-bottom-joystick, depth:q/e-or-pinch(in/out), kill:k-or-A, suction:x-or-S, boost:shift-or-B, pause:p/touch, restart:r/touch, fullscreen:f',
       touchUi: shouldShowTouchUI(),
     });
   };
