@@ -173,3 +173,44 @@ Original prompt: [$develop-web-game](/Users/sungchulkang/.codex/skills/develop-w
 - Playwright 검증: `/tmp/growTheFish-penguin-check`
   - 시각 보강(해저/빛무늬) 확인
   - 상태 JSON에서 신규/수정 로직 필드 정상 출력 확인
+
+## Update 11
+- 모바일 플레이 대응 추가
+  - 터치 입력 처리 추가: `touchstart/touchmove/touchend` 기반 이동/액션 입력
+  - 모바일 가상 컨트롤 UI 추가
+    - 좌측 이동 패드
+    - 우측 액션 버튼(공격/흡인/부스트/깊이 조절)
+    - 플레이 중 일시정지 버튼
+  - 시작/일시정지/게임오버 화면에 탭 가능한 버튼 추가
+    - Start / Resume / Restart
+    - 종/맵 이전/다음 버튼
+  - 캔버스 반응형 리사이즈 적용(16:9 유지, 화면에 맞춤)
+  - 터치 환경에서 스크롤/선택 간섭 방지(`touch-action: none`, `user-select: none`)
+  - `render_game_to_text`에 `touchUi` 상태 유지 및 controls 설명 갱신
+
+## Validation
+- `node --check game.js`: 통과 (2026-02-08, Update 11)
+- Playwright 클라이언트 검증: `/tmp/growTheFish-mobile-check-2`
+  - 플레이 상태 진입 및 스크린샷 생성 확인
+  - 상태 JSON 확인(`controls`에 터치 조작 반영)
+- 모바일 뷰포트 검증(390x844, `hasTouch/isMobile=true`)
+  - `render_game_to_text.touchUi === true` 확인
+
+## TODO (Next)
+- 실제 모바일 기기에서 멀티터치(이동 + 공격/부스트 동시 입력) 감도 튜닝
+- 모바일 시작 화면 탭 대상 크기(접근성) 추가 미세조정
+
+## Update 12
+- 모바일 화면 비율/크기 보정
+  - 모바일 환경(`touch/coarse pointer`)에서는 캔버스를 뷰포트 전체로 사용하도록 변경
+  - 시작 화면 레이아웃을 패널 기준 비례 배치로 재구성(세로/가로 대응)
+  - 고정 대형 타이틀/설명 텍스트를 화면 크기 기반 폰트로 축소/정렬
+  - 종/맵 선택 버튼과 안내 텍스트 겹침 방지(텍스트 하단 기준 자동 배치)
+  - HUD도 모바일에서 높이/글자 크기 축소해 상단 공간 점유 최소화
+
+## Validation
+- `node --check game.js`: 통과 (2026-02-08, Update 12)
+- 모바일 뷰포트 스크린샷 비교
+  - before: `/tmp/growTheFish-mobile-portrait-before.png`, `/tmp/growTheFish-mobile-landscape-before.png`
+  - after: `/tmp/growTheFish-mobile-portrait-after.png`, `/tmp/growTheFish-mobile-landscape-after2.png`
+  - 결과: 세로/가로 모두 텍스트 겹침 해소, 버튼 가시성 및 배치 정상화
