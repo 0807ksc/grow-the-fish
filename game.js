@@ -1,6 +1,8 @@
 (() => {
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
+  const TOUCH_CAPABLE = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const COARSE_POINTER = window.matchMedia?.('(pointer: coarse)')?.matches || false;
 
   const PLAYER_SPECIES = [
     { key: 'clownfish', label: '흰동가리', scientific: 'Amphiprion ocellaris', color: '#ff8f3d', speed: 370, baseR: 24 },
@@ -137,8 +139,20 @@
     suctionTimer: 0,
     killFlash: 0,
     biomeImpactTimer: 300,
+    damagePopups: [],
+    hitEffects: [],
+    playerDamagePopupCooldown: 0,
     ui: {
       speciesButtons: [],
+      touchButtons: {},
+    },
+    touch: {
+      moveX: 0,
+      moveY: 0,
+      buttons: new Set(),
+      usingTouch: TOUCH_CAPABLE,
+      pinchStartDist: 0,
+      pinchDepthDir: 0,
     },
   };
 
@@ -237,6 +251,33 @@
 
   function seabedWorldY() {
     return state.world.h * 0.44;
+  }
+
+  function addDamagePopup(x, y, z, text, color = '#ffeaa7', emphasis = 1) {
+    state.damagePopups.push({
+      x,
+      y,
+      z,
+      vy: -48 * emphasis,
+      life: 0.7 + 0.2 * emphasis,
+      maxLife: 0.7 + 0.2 * emphasis,
+      text,
+      color,
+      emphasis,
+    });
+  }
+
+  function addHitEffect(x, y, z, color = 'rgba(255, 210, 140, 0.65)', power = 1) {
+    state.hitEffects.push({
+      x,
+      y,
+      z,
+      r: 14,
+      vr: 95 + power * 40,
+      life: 0.35 + power * 0.2,
+      maxLife: 0.35 + power * 0.2,
+      color,
+    });
   }
 
   function setPlayerSpecies(index) {
@@ -341,6 +382,9 @@
     state.suctionTimer = 0;
     state.killFlash = 0;
     state.biomeImpactTimer = 300;
+    state.damagePopups = [];
+    state.hitEffects = [];
+    state.playerDamagePopupCooldown = 0;
     for (let i = 0; i < 72; i++) spawnEntity(i < 26);
   }
 
@@ -349,13 +393,44 @@
     else document.exitFullscreen?.();
   }
 
+  function togglePause() {
+    if (state.mode === 'playing') {
+      state.prePauseMode = 'playing';
+      state.mode = 'paused';
+    } else if (state.mode === 'paused') {
+      state.mode = state.prePauseMode || 'playing';
+    }
+  }
+
+  function shouldShowTouchUI() {
+    return state.touch.usingTouch || TOUCH_CAPABLE || COARSE_POINTER || window.innerWidth <= 900;
+  }
+
+  function fitCanvasSize() {
+    const aspect = 16 / 9;
+    const margin = 12;
+    const maxW = Math.max(320, window.innerWidth - margin * 2);
+    const maxH = Math.max(220, window.innerHeight - margin * 2);
+    let w = maxW;
+    let h = Math.round(w / aspect);
+    if (h > maxH) {
+      h = maxH;
+      w = Math.round(h * aspect);
+    }
+    return { w: Math.max(320, w), h: Math.max(220, h) };
+  }
+
   function onResize() {
     if (document.fullscreenElement === canvas) {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
+    } else if (shouldShowTouchUI()) {
+      canvas.width = Math.max(320, window.innerWidth);
+      canvas.height = Math.max(220, window.innerHeight);
     } else {
-      canvas.width = 1080;
-      canvas.height = 600;
+      const size = fitCanvasSize();
+      canvas.width = size.w;
+      canvas.height = size.h;
     }
   }
 
@@ -367,12 +442,7 @@
       return;
     }
     if (key === 'p') {
-      if (state.mode === 'playing') {
-        state.prePauseMode = 'playing';
-        state.mode = 'paused';
-      } else if (state.mode === 'paused') {
-        state.mode = state.prePauseMode || 'playing';
-      }
+      togglePause();
       return;
     }
 
@@ -413,11 +483,6 @@
       return;
     }
 
-    if (state.mode === 'playing' && key === 'x' && state.suctionCooldown <= 0) {
-      state.suctionTimer = 2.1;
-      state.suctionCooldown = 6.0;
-    }
-
     state.keys.add(key);
   }
 
@@ -425,11 +490,75 @@
     state.keys.delete(e.key.toLowerCase());
   }
 
-  function handleMouseDown(e) {
-    if (state.mode !== 'start') return;
+  function getCanvasPoint(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
-    const sx = ((e.clientX - rect.left) * canvas.width) / rect.width;
-    const sy = ((e.clientY - rect.top) * canvas.height) / rect.height;
+    return {
+      sx: ((clientX - rect.left) * canvas.width) / rect.width,
+      sy: ((clientY - rect.top) * canvas.height) / rect.height,
+    };
+  }
+
+  function circleHit(sx, sy, c) {
+    if (!c) return false;
+    return Math.hypot(sx - c.cx, sy - c.cy) <= c.r;
+  }
+
+  function pressAt(sx, sy) {
+    if (state.mode === 'start') {
+      const ui = state.ui.touchButtons;
+      if (ui.prevSpecies && sx >= ui.prevSpecies.x && sx <= ui.prevSpecies.x + ui.prevSpecies.w && sy >= ui.prevSpecies.y && sy <= ui.prevSpecies.y + ui.prevSpecies.h) {
+        setPlayerSpecies(state.selectedPlayerIndex - 1);
+        render();
+        return true;
+      }
+      if (ui.nextSpecies && sx >= ui.nextSpecies.x && sx <= ui.nextSpecies.x + ui.nextSpecies.w && sy >= ui.nextSpecies.y && sy <= ui.nextSpecies.y + ui.nextSpecies.h) {
+        setPlayerSpecies(state.selectedPlayerIndex + 1);
+        render();
+        return true;
+      }
+      if (ui.prevBiome && sx >= ui.prevBiome.x && sx <= ui.prevBiome.x + ui.prevBiome.w && sy >= ui.prevBiome.y && sy <= ui.prevBiome.y + ui.prevBiome.h) {
+        cycleBiome(-1);
+        render();
+        return true;
+      }
+      if (ui.nextBiome && sx >= ui.nextBiome.x && sx <= ui.nextBiome.x + ui.nextBiome.w && sy >= ui.nextBiome.y && sy <= ui.nextBiome.y + ui.nextBiome.h) {
+        cycleBiome(1);
+        render();
+        return true;
+      }
+      if (ui.start && sx >= ui.start.x && sx <= ui.start.x + ui.start.w && sy >= ui.start.y && sy <= ui.start.y + ui.start.h) {
+        resetGame();
+        return true;
+      }
+    }
+    if ((state.mode === 'gameover' || state.mode === 'win') && state.ui.touchButtons.restart) {
+      const b = state.ui.touchButtons.restart;
+      if (sx >= b.x && sx <= b.x + b.w && sy >= b.y && sy <= b.y + b.h) {
+        resetGame();
+        return true;
+      }
+    }
+    if (state.mode === 'paused' && state.ui.touchButtons.resume) {
+      const b = state.ui.touchButtons.resume;
+      if (sx >= b.x && sx <= b.x + b.w && sy >= b.y && sy <= b.y + b.h) {
+        togglePause();
+        return true;
+      }
+    }
+    if (state.mode === 'playing' && state.ui.touchButtons.pause) {
+      const b = state.ui.touchButtons.pause;
+      if (sx >= b.x && sx <= b.x + b.w && sy >= b.y && sy <= b.y + b.h) {
+        togglePause();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function handleMouseDown(e) {
+    const { sx, sy } = getCanvasPoint(e.clientX, e.clientY);
+    if (pressAt(sx, sy)) return;
+    if (state.mode !== 'start') return;
     for (const btn of state.ui.speciesButtons) {
       if (sx >= btn.x && sx <= btn.x + btn.w && sy >= btn.y && sy <= btn.y + btn.h) {
         setPlayerSpecies(btn.index);
@@ -437,6 +566,95 @@
         return;
       }
     }
+  }
+
+  function updateTouchState(touches) {
+    state.touch.moveX = 0;
+    state.touch.moveY = 0;
+    state.touch.buttons.clear();
+    state.touch.pinchDepthDir = 0;
+    if (state.mode !== 'playing') return;
+
+    const ui = state.ui.touchButtons;
+    let moveCount = 0;
+    for (const t of touches) {
+      const { sx, sy } = getCanvasPoint(t.clientX, t.clientY);
+      if (ui.joy && circleHit(sx, sy, ui.joy)) {
+        const dx = sx - ui.joy.cx;
+        const dy = sy - ui.joy.cy;
+        const len = Math.hypot(dx, dy) || 1;
+        const scale = Math.min(1, len / ui.joy.r);
+        state.touch.moveX += (dx / len) * scale;
+        state.touch.moveY += (dy / len) * scale;
+        moveCount += 1;
+        continue;
+      }
+      if (circleHit(sx, sy, ui.attack)) state.touch.buttons.add('k');
+      if (circleHit(sx, sy, ui.suction)) state.touch.buttons.add('x');
+      if (circleHit(sx, sy, ui.boost)) state.touch.buttons.add('shift');
+    }
+
+    if (moveCount > 0) {
+      state.touch.moveX = clamp(state.touch.moveX / moveCount, -1, 1);
+      state.touch.moveY = clamp(state.touch.moveY / moveCount, -1, 1);
+    }
+
+    if (touches.length >= 2) {
+      const p1 = getCanvasPoint(touches[0].clientX, touches[0].clientY);
+      const p2 = getCanvasPoint(touches[1].clientX, touches[1].clientY);
+      const p1OnControl = circleHit(p1.sx, p1.sy, ui.joy) || circleHit(p1.sx, p1.sy, ui.attack) || circleHit(p1.sx, p1.sy, ui.suction) || circleHit(p1.sx, p1.sy, ui.boost) || (ui.pause && p1.sx >= ui.pause.x && p1.sx <= ui.pause.x + ui.pause.w && p1.sy >= ui.pause.y && p1.sy <= ui.pause.y + ui.pause.h);
+      const p2OnControl = circleHit(p2.sx, p2.sy, ui.joy) || circleHit(p2.sx, p2.sy, ui.attack) || circleHit(p2.sx, p2.sy, ui.suction) || circleHit(p2.sx, p2.sy, ui.boost) || (ui.pause && p2.sx >= ui.pause.x && p2.sx <= ui.pause.x + ui.pause.w && p2.sy >= ui.pause.y && p2.sy <= ui.pause.y + ui.pause.h);
+      if (p1OnControl || p2OnControl) {
+        state.touch.pinchStartDist = 0;
+      } else {
+      const dist = Math.hypot(p1.sx - p2.sx, p1.sy - p2.sy);
+      if (!state.touch.pinchStartDist) state.touch.pinchStartDist = dist;
+      const delta = dist - state.touch.pinchStartDist;
+      if (Math.abs(delta) > 18) {
+        state.touch.pinchDepthDir = delta > 0 ? 1 : -1; // out=e, in=q
+        state.touch.pinchStartDist = dist;
+      }
+      }
+    } else {
+      state.touch.pinchStartDist = 0;
+    }
+
+    if (state.touch.pinchDepthDir > 0) state.touch.buttons.add('e');
+    if (state.touch.pinchDepthDir < 0) state.touch.buttons.add('q');
+  }
+
+  function handleTouchStart(e) {
+    e.preventDefault();
+    state.touch.usingTouch = true;
+    for (const t of e.changedTouches) {
+      const { sx, sy } = getCanvasPoint(t.clientX, t.clientY);
+      if (pressAt(sx, sy)) continue;
+      if (state.mode === 'start') {
+        for (const btn of state.ui.speciesButtons) {
+          if (sx >= btn.x && sx <= btn.x + btn.w && sy >= btn.y && sy <= btn.y + btn.h) {
+            setPlayerSpecies(btn.index);
+            render();
+            break;
+          }
+        }
+      }
+    }
+    updateTouchState(e.touches);
+  }
+
+  function handleTouchMove(e) {
+    e.preventDefault();
+    updateTouchState(e.touches);
+  }
+
+  function handleTouchEnd(e) {
+    e.preventDefault();
+    if (e.touches.length < 2) state.touch.pinchStartDist = 0;
+    updateTouchState(e.touches);
+  }
+
+  function keyActive(key) {
+    return state.keys.has(key) || state.touch.buttons.has(key);
   }
 
   function attackBurst() {
@@ -454,12 +672,16 @@
       if (dist < pR * 3.2 && inFront) {
         const damage = state.player.size >= e.size * 0.8 ? 90 : 40;
         e.hp -= damage;
+        addDamagePopup(e.x, e.y, e.z, `-${Math.round(damage)}`, '#ffd5b0', damage >= 90 ? 1.2 : 1);
+        addHitEffect(e.x, e.y, e.z, 'rgba(255, 198, 135, 0.75)', damage >= 90 ? 1.1 : 0.8);
         if (e.hp <= 0) {
           e.deadTimer = 0.45;
           state.score += Math.ceil(e.size * 18);
           state.kills += 1;
           state.player.size = clamp(state.player.size + e.size * 0.02, 1, 4.5);
           state.killFlash = 0.2;
+          addDamagePopup(e.x, e.y, e.z - 0.02, 'CRIT BITE!', '#fff4be', 1.35);
+          addHitEffect(e.x, e.y, e.z, 'rgba(255, 244, 190, 0.85)', 1.4);
           killed += 1;
         }
       }
@@ -469,10 +691,12 @@
 
   function updatePlayer(dt) {
     const bm = biomeModifiers();
-    const dirX = (state.keys.has('d') || state.keys.has('arrowright') ? 1 : 0) - (state.keys.has('a') || state.keys.has('arrowleft') ? 1 : 0);
-    const dirY = (state.keys.has('s') || state.keys.has('arrowdown') ? 1 : 0) - (state.keys.has('w') || state.keys.has('arrowup') ? 1 : 0);
-    const dirZ = (state.keys.has('e') ? 1 : 0) - (state.keys.has('q') ? 1 : 0);
-    const wantsBoost = state.keys.has('shift');
+    const keyDirX = (keyActive('d') || keyActive('arrowright') ? 1 : 0) - (keyActive('a') || keyActive('arrowleft') ? 1 : 0);
+    const keyDirY = (keyActive('s') || keyActive('arrowdown') ? 1 : 0) - (keyActive('w') || keyActive('arrowup') ? 1 : 0);
+    const dirX = clamp(keyDirX + state.touch.moveX, -1, 1);
+    const dirY = clamp(keyDirY + state.touch.moveY, -1, 1);
+    const dirZ = (keyActive('e') ? 1 : 0) - (keyActive('q') ? 1 : 0);
+    const wantsBoost = keyActive('shift');
 
     if (wantsBoost && state.player.boostStamina > 0) {
       state.player.speedBoost = 1.9;
@@ -500,7 +724,11 @@
     state.player.y = clamp(state.player.y, -state.world.h * 0.5, state.world.h * 0.5);
     state.player.z = clamp(state.player.z, state.world.zNear, state.world.zFar);
 
-    if (state.keys.has('k')) attackBurst();
+    if (keyActive('k')) attackBurst();
+    if (keyActive('x') && state.suctionCooldown <= 0) {
+      state.suctionTimer = 2.1;
+      state.suctionCooldown = 6.0;
+    }
   }
 
   function updateEntities(dt) {
@@ -571,11 +799,19 @@
       const touch = collisionDist < pR + entityRadius(e) * 0.95;
       if (touch) {
         if (canEat) {
+          addDamagePopup(e.x, e.y, e.z, `-${Math.max(1, Math.round(e.hp))}`, '#bfffe0', 1.15);
+          addHitEffect(e.x, e.y, e.z, 'rgba(156, 255, 215, 0.8)', 1.1);
           e.deadTimer = 0.4;
           state.score += Math.ceil(e.size * 11);
           state.player.size = clamp(state.player.size + e.size * 0.022, 1, 4.5);
         } else {
-          state.player.hp = clamp(state.player.hp - dt * 46 * bm.incomingDamageMul, 0, 100);
+          const playerDamage = dt * 46 * bm.incomingDamageMul;
+          state.player.hp = clamp(state.player.hp - playerDamage, 0, 100);
+          if (state.playerDamagePopupCooldown <= 0) {
+            addDamagePopup(state.player.x, state.player.y - 26, state.player.z, `-${Math.max(1, Math.round(playerDamage))}`, '#ffb8b8', 1);
+            addHitEffect(state.player.x, state.player.y, state.player.z, 'rgba(255, 140, 150, 0.78)', 0.9);
+            state.playerDamagePopupCooldown = 0.18;
+          }
           if (state.player.hp <= 0) {
             state.mode = 'gameover';
           }
@@ -598,6 +834,20 @@
     state.spawnCooldown = 0.22;
   }
 
+  function updateCombatEffects(dt) {
+    state.playerDamagePopupCooldown = Math.max(0, state.playerDamagePopupCooldown - dt);
+    for (const p of state.damagePopups) {
+      p.y += p.vy * dt;
+      p.life -= dt;
+    }
+    for (const e of state.hitEffects) {
+      e.r += e.vr * dt;
+      e.life -= dt;
+    }
+    state.damagePopups = state.damagePopups.filter((p) => p.life > 0);
+    state.hitEffects = state.hitEffects.filter((e) => e.life > 0);
+  }
+
   function updatePlaying(dt) {
     state.time += dt;
     state.biomeImpactTimer = Math.max(0, state.biomeImpactTimer - dt);
@@ -609,6 +859,7 @@
     updatePlayer(dt);
     updateEntities(dt);
     updateSpawning(dt);
+    updateCombatEffects(dt);
 
     if (state.player.size >= 4.0 && state.kills >= 8 && state.mode === 'playing') {
       state.mode = 'win';
@@ -869,20 +1120,30 @@
   }
 
   function drawHUD() {
+    const mobile = shouldShowTouchUI();
+    const portrait = canvas.height > canvas.width;
+    const hudX = mobile ? 8 : 12;
+    const hudY = mobile ? 8 : 10;
+    const hudW = mobile ? canvas.width - 16 : 650;
+    const hudH = mobile ? (portrait ? 112 : 130) : 148;
+    const fontSize = mobile ? (portrait ? 12 : 14) : 18;
+    const lineGap = mobile ? (portrait ? 18 : 22) : 24;
+    const textX = hudX + 10;
+    const firstY = hudY + (mobile ? 18 : 24);
+
     ctx.fillStyle = 'rgba(0, 14, 26, 0.5)';
-    ctx.fillRect(12, 10, 650, 148);
+    ctx.fillRect(hudX, hudY, hudW, hudH);
 
     ctx.fillStyle = '#dff3ff';
-    ctx.font = '18px Trebuchet MS';
-    ctx.fillText(`맵: ${currentBiome().label}  |  모드: ${state.mode.toUpperCase()}`, 24, 34);
-    ctx.fillText(`종: ${state.player.speciesLabel}  |  점수: ${state.score}  |  처치: ${state.kills}`, 24, 58);
-    ctx.fillText(`크기: ${state.player.size.toFixed(2)}x  |  HP: ${state.player.hp.toFixed(0)}  |  개체수: ${state.entities.length}`, 24, 82);
-    ctx.fillText(`부스트:${state.player.boostStamina.toFixed(0)}  흡인CD:${state.suctionCooldown.toFixed(1)}  공격CD:${state.attackCooldown.toFixed(1)}`, 24, 106);
-    ctx.fillText(`맵 체감 강화: ${Math.ceil(state.biomeImpactTimer)}초 남음`, 24, 130);
+    ctx.font = `${fontSize}px Trebuchet MS`;
+    ctx.fillText(`맵:${currentBiome().label} | 모드:${state.mode.toUpperCase()} | 종:${state.player.speciesLabel}`, textX, firstY);
+    ctx.fillText(`점수:${state.score} | 처치:${state.kills} | 크기:${state.player.size.toFixed(2)}x | HP:${state.player.hp.toFixed(0)}`, textX, firstY + lineGap);
+    ctx.fillText(`부스트:${state.player.boostStamina.toFixed(0)} | 흡인CD:${state.suctionCooldown.toFixed(1)} | 공격CD:${state.attackCooldown.toFixed(1)}`, textX, firstY + lineGap * 2);
+    ctx.fillText(`강화:${Math.ceil(state.biomeImpactTimer)}초 | 개체수:${state.entities.length}`, textX, firstY + lineGap * 3);
 
     if (state.suctionTimer > 0) {
       ctx.fillStyle = 'rgba(133, 235, 199, 0.9)';
-      ctx.fillRect(24, 136, clamp((state.suctionTimer / 2.1) * 220, 0, 220), 8);
+      ctx.fillRect(textX, hudY + hudH - 10, clamp((state.suctionTimer / 2.1) * 180, 0, 180), 6);
     }
 
     if (state.killFlash > 0) {
@@ -950,33 +1211,45 @@
   }
 
   function drawStart() {
+    const mobile = shouldShowTouchUI();
+    const portrait = mobile && canvas.height > canvas.width;
+    const panel = mobile
+      ? { x: canvas.width * 0.04, y: canvas.height * 0.08, w: canvas.width * 0.92, h: canvas.height * 0.84 }
+      : { x: canvas.width * 0.08, y: canvas.height * 0.14, w: canvas.width * 0.84, h: canvas.height * 0.74 };
+
     drawSurface();
     drawBubbles();
 
     ctx.fillStyle = 'rgba(0, 10, 18, 0.58)';
-    ctx.fillRect(canvas.width * 0.08, canvas.height * 0.14, canvas.width * 0.84, canvas.height * 0.74);
+    ctx.fillRect(panel.x, panel.y, panel.w, panel.h);
 
     ctx.fillStyle = '#def6ff';
     ctx.textAlign = 'center';
-    ctx.font = 'bold 46px Trebuchet MS';
-    ctx.fillText('GROW THE FISH: REAL OCEAN HUNT', canvas.width * 0.5, canvas.height * 0.26);
+    ctx.font = `bold ${mobile ? (portrait ? 34 : 40) : 46}px Trebuchet MS`;
+    ctx.fillText('GROW THE FISH', canvas.width * 0.5, panel.y + panel.h * 0.16);
+    ctx.font = `bold ${mobile ? (portrait ? 18 : 20) : 22}px Trebuchet MS`;
+    ctx.fillText('REAL OCEAN HUNT', canvas.width * 0.5, panel.y + panel.h * 0.23);
 
-    ctx.font = '20px Trebuchet MS';
-    ctx.fillText(`플레이어: ${state.player.speciesLabel} (${state.player.scientific})`, canvas.width * 0.5, canvas.height * 0.37);
-    ctx.fillText(`선택 맵: ${currentBiome().label}`, canvas.width * 0.5, canvas.height * 0.43);
-    ctx.fillText('종 변경: 1/2/3 또는 [ ]', canvas.width * 0.5, canvas.height * 0.50);
-    ctx.fillText('맵 변경: , . 또는 N/M 또는 4/5 (해변가 포함)', canvas.width * 0.5, canvas.height * 0.56);
-    ctx.fillText('맵을 바꾸면 체감 강화 효과가 5분(300초) 유지', canvas.width * 0.5, canvas.height * 0.59);
-    ctx.fillText('이동: WASD/방향키, 깊이: Q/E, 공격: K, 흡인: X, 부스트: Shift', canvas.width * 0.5, canvas.height * 0.62);
-    ctx.fillText('일시정지: P, 전체화면: F, 재시작: R', canvas.width * 0.5, canvas.height * 0.68);
-    ctx.fillText('기본 시작 시 플레이어 꼬리 시점으로 시작', canvas.width * 0.5, canvas.height * 0.74);
-    ctx.fillText('Enter/Space 시작', canvas.width * 0.5, canvas.height * 0.81);
+    const infoFont = mobile ? (portrait ? 14 : 17) : 20;
+    const lineGap = mobile ? (portrait ? 24 : 22) : 26;
+    let infoY = panel.y + panel.h * 0.32;
+    ctx.font = `${infoFont}px Trebuchet MS`;
+    ctx.fillText(`플레이어: ${state.player.speciesLabel} (${state.player.scientific})`, canvas.width * 0.5, infoY);
+    infoY += lineGap;
+    ctx.fillText(`선택 맵: ${currentBiome().label}`, canvas.width * 0.5, infoY);
+    infoY += lineGap;
+    ctx.fillText('종/맵 변경: 좌우 버튼 (키보드도 가능)', canvas.width * 0.5, infoY);
+    infoY += lineGap;
+    ctx.fillText('모바일: 오른쪽 아래 MOVE + 왼쪽 아래 B/S/A + 핀치 Q/E', canvas.width * 0.5, infoY);
+    infoY += lineGap;
+    ctx.fillText('시작: START 버튼 또는 Enter/Space', canvas.width * 0.5, infoY);
+    const infoBottom = infoY;
 
     state.ui.speciesButtons = [];
-    const baseY = canvas.height * 0.45;
-    const w = 210;
-    const h = 42;
-    const gap = 16;
+    const baseY = Math.max(panel.y + panel.h * 0.52, infoBottom + 18);
+    const w = Math.min(210, panel.w * 0.26);
+    const h = Math.max(38, panel.h * 0.07);
+    const gap = Math.max(8, canvas.width * 0.014);
     const total = w * PLAYER_SPECIES.length + gap * (PLAYER_SPECIES.length - 1);
     const startX = canvas.width * 0.5 - total * 0.5;
     for (let i = 0; i < PLAYER_SPECIES.length; i++) {
@@ -989,14 +1262,50 @@
       ctx.lineWidth = 2;
       ctx.strokeRect(x, baseY, w, h);
       ctx.fillStyle = picked ? '#072130' : '#d7f3ff';
-      ctx.font = 'bold 17px Trebuchet MS';
-      ctx.fillText(p.label, x + w * 0.5, baseY + 27);
+      ctx.font = `bold ${Math.round(clamp(w * 0.09, 12, 17))}px Trebuchet MS`;
+      ctx.fillText(p.label, x + w * 0.5, baseY + h * 0.65);
       state.ui.speciesButtons.push({ x, y: baseY, w, h, index: i });
     }
 
-    ctx.font = '16px Trebuchet MS';
+    ctx.font = `${mobile ? (portrait ? 13 : 15) : 16}px Trebuchet MS`;
     ctx.fillStyle = '#c8f2ff';
-    ctx.fillText('물고기 버튼 클릭으로 종 선택 가능', canvas.width * 0.5, canvas.height * 0.53);
+    ctx.fillText('물고기 버튼/키보드로 종 선택 가능', canvas.width * 0.5, baseY + h + 24);
+
+    const navW = mobile ? Math.max(44, panel.w * 0.10) : 52;
+    const navH = mobile ? Math.max(40, panel.h * 0.065) : 42;
+    const biomeY = baseY + h + 34;
+    const speciesY = baseY + h * 0.5;
+    const leftX = panel.x + panel.w * 0.08;
+    const rightX = panel.x + panel.w * 0.92 - navW;
+    state.ui.touchButtons.prevSpecies = { x: leftX, y: speciesY - navH * 0.5, w: navW, h: navH };
+    state.ui.touchButtons.nextSpecies = { x: rightX, y: speciesY - navH * 0.5, w: navW, h: navH };
+    state.ui.touchButtons.prevBiome = { x: leftX, y: biomeY - navH * 0.5, w: navW, h: navH };
+    state.ui.touchButtons.nextBiome = { x: rightX, y: biomeY - navH * 0.5, w: navW, h: navH };
+    state.ui.touchButtons.start = { x: canvas.width * 0.34, y: panel.y + panel.h * 0.80, w: canvas.width * 0.32, h: Math.max(42, panel.h * 0.08) };
+
+    const navButtons = [state.ui.touchButtons.prevSpecies, state.ui.touchButtons.nextSpecies, state.ui.touchButtons.prevBiome, state.ui.touchButtons.nextBiome];
+    const navLabels = ['<', '>', '<', '>'];
+    for (let i = 0; i < navButtons.length; i++) {
+      const b = navButtons[i];
+      ctx.fillStyle = 'rgba(16, 44, 62, 0.85)';
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.strokeStyle = 'rgba(170,226,255,0.7)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+      ctx.fillStyle = '#dff6ff';
+      ctx.font = `bold ${Math.round(clamp(navH * 0.56, 20, 28))}px Trebuchet MS`;
+      ctx.fillText(navLabels[i], b.x + b.w * 0.5, b.y + navH * 0.70);
+    }
+
+    const sb = state.ui.touchButtons.start;
+    ctx.fillStyle = 'rgba(86, 196, 222, 0.86)';
+    ctx.fillRect(sb.x, sb.y, sb.w, sb.h);
+    ctx.strokeStyle = '#e4fdff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(sb.x, sb.y, sb.w, sb.h);
+    ctx.fillStyle = '#042534';
+    ctx.font = `bold ${Math.round(clamp(sb.h * 0.52, 19, 28))}px Trebuchet MS`;
+    ctx.fillText('START', sb.x + sb.w * 0.5, sb.y + sb.h * 0.68);
     ctx.textAlign = 'start';
   }
 
@@ -1011,6 +1320,16 @@
     ctx.fillText(subtitle, canvas.width * 0.5, canvas.height * 0.5);
     ctx.fillText(`점수: ${state.score} / 처치: ${state.kills}`, canvas.width * 0.5, canvas.height * 0.58);
     ctx.fillText('R 키로 재시작', canvas.width * 0.5, canvas.height * 0.66);
+    state.ui.touchButtons.restart = { x: canvas.width * 0.38, y: canvas.height * 0.61, w: canvas.width * 0.24, h: 48 };
+    const rb = state.ui.touchButtons.restart;
+    ctx.fillStyle = 'rgba(104, 212, 240, 0.9)';
+    ctx.fillRect(rb.x, rb.y, rb.w, rb.h);
+    ctx.strokeStyle = '#e0fbff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rb.x, rb.y, rb.w, rb.h);
+    ctx.fillStyle = '#042333';
+    ctx.font = 'bold 22px Trebuchet MS';
+    ctx.fillText('RESTART', rb.x + rb.w * 0.5, rb.y + 31);
     ctx.textAlign = 'start';
   }
 
@@ -1023,6 +1342,101 @@
     ctx.fillText('PAUSED', canvas.width * 0.5, canvas.height * 0.45);
     ctx.font = '24px Trebuchet MS';
     ctx.fillText('P 키로 재개', canvas.width * 0.5, canvas.height * 0.54);
+    state.ui.touchButtons.resume = { x: canvas.width * 0.40, y: canvas.height * 0.50, w: canvas.width * 0.2, h: 44 };
+    const b = state.ui.touchButtons.resume;
+    ctx.fillStyle = 'rgba(104, 212, 240, 0.9)';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = '#e0fbff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = '#042333';
+    ctx.font = 'bold 20px Trebuchet MS';
+    ctx.fillText('RESUME', b.x + b.w * 0.5, b.y + 29);
+    ctx.textAlign = 'start';
+  }
+
+  function drawTouchControls() {
+    if (!shouldShowTouchUI() || state.mode !== 'playing') return;
+    const portrait = canvas.height > canvas.width;
+    const mainR = Math.max(52, Math.min(canvas.width, canvas.height) * (portrait ? 0.12 : 0.10));
+    const btnR = Math.max(30, Math.min(canvas.width, canvas.height) * (portrait ? 0.07 : 0.06));
+    const joy = { cx: canvas.width - mainR - 18, cy: canvas.height - mainR - 18, r: mainR };
+    const baseX = 22 + btnR * 1.15;
+    const baseY = canvas.height - 24 - btnR;
+    const step = btnR * 2.1;
+    const boost = { cx: baseX, cy: baseY - step, r: btnR }; // B: top-left
+    const attack = { cx: baseX + step * 1.1, cy: baseY - step * 0.52, r: btnR }; // A: mid-right
+    const suction = { cx: baseX, cy: baseY, r: btnR }; // S: bottom-left
+    const pause = { x: canvas.width * 0.90, y: canvas.height * 0.03, w: canvas.width * 0.07, h: canvas.height * 0.08 };
+    state.ui.touchButtons = { ...state.ui.touchButtons, joy, pause, boost, suction, attack };
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(10, 25, 35, 0.36)';
+    ctx.beginPath();
+    ctx.arc(joy.cx, joy.cy, joy.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(150, 220, 245, 0.7)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#d7f6ff';
+    ctx.font = `bold ${Math.max(12, Math.round(mainR * 0.34))}px Trebuchet MS`;
+    ctx.textAlign = 'center';
+    ctx.fillText('MOVE', joy.cx, joy.cy + 6);
+
+    ctx.font = `bold ${Math.max(11, Math.round(btnR * 0.70))}px Trebuchet MS`;
+    for (const [b, label] of [[boost, 'B'], [suction, 'S'], [attack, 'A']]) {
+      ctx.fillStyle = 'rgba(8, 30, 44, 0.56)';
+      ctx.beginPath();
+      ctx.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(170, 230, 255, 0.78)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = '#e4faff';
+      ctx.fillText(label, b.cx, b.cy + 5);
+    }
+
+    ctx.fillStyle = 'rgba(8, 30, 44, 0.5)';
+    ctx.fillRect(pause.x, pause.y, pause.w, pause.h);
+    ctx.strokeStyle = 'rgba(170, 230, 255, 0.75)';
+    ctx.strokeRect(pause.x, pause.y, pause.w, pause.h);
+    ctx.fillStyle = '#e4faff';
+    ctx.fillText('II', pause.x + pause.w * 0.5, pause.y + pause.h * 0.62);
+    ctx.font = `${Math.max(11, Math.round(btnR * 0.36))}px Trebuchet MS`;
+    ctx.fillStyle = 'rgba(220,245,255,0.86)';
+    ctx.fillText('Pinch in: Q  Pinch out: E', canvas.width * 0.5, canvas.height - 10);
+    ctx.textAlign = 'start';
+    ctx.restore();
+  }
+
+  function drawCombatEffects() {
+    for (const e of state.hitEffects) {
+      const p = project(e.x, e.y, e.z);
+      const alpha = clamp(e.life / e.maxLife, 0, 1);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = e.color;
+      ctx.lineWidth = Math.max(1.5, 3 * p.scale);
+      ctx.beginPath();
+      ctx.arc(p.screenX, p.screenY, e.r * p.scale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const pop of state.damagePopups) {
+      const p = project(pop.x, pop.y, pop.z);
+      const alpha = clamp(pop.life / pop.maxLife, 0, 1);
+      const fontSize = Math.round(clamp(15 * p.scale * pop.emphasis + 12, 13, 28));
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.font = `bold ${fontSize}px Trebuchet MS`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = pop.color;
+      ctx.strokeStyle = 'rgba(8,18,26,0.85)';
+      ctx.lineWidth = 3;
+      ctx.strokeText(pop.text, p.screenX, p.screenY - 6);
+      ctx.fillText(pop.text, p.screenX, p.screenY - 6);
+      ctx.restore();
+    }
     ctx.textAlign = 'start';
   }
 
@@ -1057,8 +1471,10 @@
       }
     }
 
+    drawCombatEffects();
     drawHUD();
     drawGuides();
+    drawTouchControls();
 
     if (state.mode === 'paused') drawPaused();
     if (state.mode === 'gameover') drawEnd('GAME OVER', '사냥꾼에게 당했습니다');
@@ -1137,7 +1553,8 @@
       })),
       entityCount: state.entities.length,
       objective: 'grow, hunt, and survive across river/wetland/reef/ocean/arctic biomes',
-      controls: 'species:1/2/3/[ ], map:,./n/m/4/5, start:enter/space, move:wasd/arrows, depth:q/e, kill:k, suction:x, boost:shift, pause:p, restart:r, fullscreen:f',
+      controls: 'species:1/2/3/[ ], map:,./n/m/4/5, start:enter/space/touch, move:wasd/arrows/right-bottom-joystick, depth:q/e-or-pinch(in/out), kill:k-or-A, suction:x-or-S, boost:shift-or-B, pause:p/touch, restart:r/touch, fullscreen:f',
+      touchUi: shouldShowTouchUI(),
     });
   };
 
@@ -1153,6 +1570,10 @@
   window.addEventListener('keydown', handleKeyDown);
   window.addEventListener('keyup', handleKeyUp);
   canvas.addEventListener('mousedown', handleMouseDown);
+  canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+  canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+  canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+  canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
   window.addEventListener('resize', onResize);
   document.addEventListener('fullscreenchange', onResize);
 
